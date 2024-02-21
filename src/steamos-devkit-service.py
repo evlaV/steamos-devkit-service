@@ -36,7 +36,6 @@ import urllib.parse
 import argparse
 
 import dbus
-import avahi
 
 SERVICE_PORT = 32000
 PACKAGE = "steamos-devkit-service"
@@ -306,10 +305,9 @@ class DevkitService:
 
         self.port = SERVICE_PORT
         self.name = get_machine_name()
-        self.host = ""
-        self.domain = ""
         self.stype = "_steamos-devkit._tcp"
         self.text = ""
+        # FIXME: Avahi remnant, add UnregisterService though
         self.group = None
 
         config = configparser.ConfigParser()
@@ -361,30 +359,52 @@ class DevkitService:
         self.httpd.server_activate()
 
     def publish(self):
-        """ Publish ourselves on avahi mdns system as an available devkit device.
+        """ Publish ourselves on mdns as an available devkit device.
         """
         bus = dbus.SystemBus()
+
+        # https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.resolve1.html
+
         self.text = [f"{CURRENT_TXTVERS}".encode(),
                      f"settings={json.dumps(self.settings)}".encode(),
                      f"login={ENTRY_POINT_USER}".encode(),
                      f"devkit1={ENTRY_POINT}".encode()
                      ]
-        server = dbus.Interface(
-            bus.get_object(
-                avahi.DBUS_NAME,
-                avahi.DBUS_PATH_SERVER),
-            avahi.DBUS_INTERFACE_SERVER)
+        register = bus.get_object(
+            'org.freedesktop.resolve1',
+            '/org/freedesktop/resolve1'
+        ).get_dbus_method(
+            'RegisterService',
+            'org.freedesktop.resolve1.Manager'
+        )
 
-        avahi_object = dbus.Interface(
-            bus.get_object(avahi.DBUS_NAME,
-                           server.EntryGroupNew()),
-            avahi.DBUS_INTERFACE_ENTRY_GROUP)
-        avahi_object.AddService(avahi.IF_UNSPEC, avahi.PROTO_UNSPEC, dbus.UInt32(0),
-                                self.name, self.stype, self.domain, self.host,
-                                dbus.UInt16(int(self.port)), self.text)
+        # TMP
+        print(f'name: {self.name}, type: {self.stype}, text: {self.text}')
 
-        avahi_object.Commit()
-        self.group = avahi_object
+        register(
+            # Passing '%H' should amount to the same thing
+            # (is expanded based on specifiers, see https://www.man7.org/linux/man-pages/man5/systemd.dnssd.5.html)
+            self.name,
+            # 'name_template' .. what is this?
+            # also referred to as 'service instance name' in the implementation
+            # can't be an empty string, gets expanded with the same specifier rules as name,
+            # gets random numbers appended to it for a new instance name in case of service collisions?
+            self.name,
+            self.stype,
+            dbus.UInt16(int(self.port)),
+            dbus.UInt16(10),    # priority (see https://en.wikipedia.org/wiki/SRV_record)
+            dbus.UInt16(0),     # weight
+            # Avahi's AddService used "aay" and you could pass self.text directly (python string list)
+            # The Resolved spec is "aa{say}"
+            # [ self.text, ] does not work, need to construct something more complicated
+            # (for no good reason based on the implementation of bus_method_register_service, it still only cares to get a string list)
+            # in any case we seem to have blocking issues before passing this correctly is a concern, so just use a dummy
+            #[ self.text, ],
+            #  'TypeError: list indices must be integers or slices, not bytes'
+            [ [], ],
+        )
+
+        # FIXME: dbus.exceptions.DBusException: org.freedesktop.DBus.Error.InteractiveAuthorizationRequired: Interactive authentication required.
 
     def unpublish(self):
         """ Remove publishing of ourselves as devkit device since we are quitting.
