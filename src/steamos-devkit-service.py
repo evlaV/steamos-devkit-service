@@ -35,14 +35,49 @@ import tempfile
 import urllib.parse
 import argparse
 import threading
+import sys
+import builtins
+import signal
 
 import dbus
-import avahi
+
+# Print to stderr, which is unbuffered and easier to read in journalctl
+STDOUT_PRINT = builtins.print
+def stderr_print(*args, **kwargs):
+    if 'file' not in kwargs:
+        kwargs['file'] = sys.stderr
+    global STDOUT_PRINT
+    return STDOUT_PRINT(*args, **kwargs)
+builtins.print = stderr_print
+
+# Expect a SIGUSR1 signal to exit
+# Could come at any time so we keep a global flag, but also support a callback
+SHOULD_EXIT = False
+EXIT_CALLBACK = None
+def handle_sigusr1(signum, frame):
+    """ Handle SIGUSR1 signal
+    """
+    global SHOULD_EXIT
+    global EXIT_CALLBACK
+    print("Received SIGUSR1, exiting.")
+    SHOULD_EXIT = True
+    if EXIT_CALLBACK:
+        EXIT_CALLBACK()
+def set_exit_callback(callback):
+    """ Set a callback to be called when we receive a SIGUSR1 signal
+    """
+    global SHOULD_EXIT
+    global EXIT_CALLBACK
+    EXIT_CALLBACK = callback
+    #print(f'Exit callback set to {EXIT_CALLBACK}')
+    if SHOULD_EXIT and EXIT_CALLBACK:
+        EXIT_CALLBACK()
+signal.signal(signal.SIGUSR1, handle_sigusr1)
 
 SERVICE_PORT = 32000
 PACKAGE = "steamos-devkit-service"
 DEVKIT_HOOKS_DIR = "/usr/share/steamos-devkit/hooks"
-CURRENT_TXTVERS = "txtvers=1"
+CURRENT_TXTVERS = '1'
 
 ENTRY_POINT = "devkit-1"
 # root until config is loaded and told otherwise, etc.
@@ -311,11 +346,9 @@ class DevkitService:
 
         self.port = SERVICE_PORT
         self.name = get_machine_name()
-        self.host = ""
-        self.domain = ""
         self.stype = "_steamos-devkit._tcp"
-        self.text = ""
-        self.group = None
+
+        self.service_path = None
 
         config = configparser.ConfigParser()
         # Use str form to preserve case
@@ -358,6 +391,33 @@ class DevkitService:
             ENTRY_POINT_USER = DEVICE_USERS[0]
             PROPERTIES["login"] = ENTRY_POINT_USER
 
+        # "an array of dictionaries mapping strings to byte arrays" .. biggest eyeroll
+        py_dict = {}
+        for key, value in [
+            ('txtvers', CURRENT_TXTVERS),
+            ('settings', json.dumps(self.settings)),
+            ('login', ENTRY_POINT_USER),
+            ('devkit1', ENTRY_POINT)
+        ]:
+            py_dict[key] = dbus.Array([ord(c) for c in value], signature='y')
+        self.txt_records = dbus.Array( [dbus.Dictionary(py_dict, signature='say' )], signature='a{say}' )
+
+        self.dbus_bus = dbus.SystemBus()
+        self.resolve1_register = self.dbus_bus.get_object(
+            'org.freedesktop.resolve1',
+            '/org/freedesktop/resolve1'
+        ).get_dbus_method(
+            'RegisterService',
+            'org.freedesktop.resolve1.Manager'
+        )
+        self.resolve1_unregister = self.dbus_bus.get_object(
+            'org.freedesktop.resolve1',
+            '/org/freedesktop/resolve1'
+        ).get_dbus_method(
+            'UnregisterService',
+            'org.freedesktop.resolve1.Manager'
+        )
+
         self.httpd = socketserver.TCPServer(("", self.port), DevkitHandler, bind_and_activate=False)
         print(f"serving at port: {self.port}")
         print(f"machine name: {self.name}")
@@ -365,46 +425,61 @@ class DevkitService:
         self.httpd.server_bind()
         self.httpd.server_activate()
 
-    def publish(self):
-        """ Publish ourselves on avahi mdns system as an available devkit device.
+    def publish(self, recursed=False, silent=False):
+        """ Publish ourselves on mdns as an available devkit device.
         """
-        bus = dbus.SystemBus()
-        self.text = [f"{CURRENT_TXTVERS}".encode(),
-                     f"settings={json.dumps(self.settings)}".encode(),
-                     f"login={ENTRY_POINT_USER}".encode(),
-                     f"devkit1={ENTRY_POINT}".encode()
-                     ]
-        server = dbus.Interface(
-            bus.get_object(
-                avahi.DBUS_NAME,
-                avahi.DBUS_PATH_SERVER),
-            avahi.DBUS_INTERFACE_SERVER)
+        # https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.resolve1.html
 
-        avahi_object = dbus.Interface(
-            bus.get_object(avahi.DBUS_NAME,
-                           server.EntryGroupNew()),
-            avahi.DBUS_INTERFACE_ENTRY_GROUP)
-        avahi_object.AddService(avahi.IF_UNSPEC, avahi.PROTO_INET, dbus.UInt32(0),
-                                self.name, self.stype, self.domain, self.host,
-                                dbus.UInt16(int(self.port)), self.text)
+        if not silent:
+            print(f'RegisterService {self.name} {self.stype} {self.port}')
+        self.unpublish(silent)
 
-        avahi_object.Commit()
-        if self.group:
-            self.group.Reset()
-        self.group = avahi_object
+        try:
+            self.service_path = self.resolve1_register(
+                # Passing '%H' should amount to the same thing
+                # (is expanded based on specifiers, see https://www.man7.org/linux/man-pages/man5/systemd.dnssd.5.html)
+                self.name,
+                # 'name_template' .. what is this?
+                # also referred to as 'service instance name' in the implementation
+                # can't be an empty string, gets expanded with the same specifier rules as name,
+                # gets random numbers appended to it for a new instance name in case of service collisions?
+                self.name,
+                self.stype,
+                dbus.UInt16(int(self.port)),
+                dbus.UInt16(10),    # priority (see https://en.wikipedia.org/wiki/SRV_record)
+                dbus.UInt16(0),     # weight
+                self.txt_records,
+            )
+        except dbus.exceptions.DBusException as e:
+            # services will persist, it's bad if we didn't properly unregister, but we can recover this
+            if not recursed and e.get_dbus_name() == 'org.freedesktop.resolve1.DnssdServiceExists':
+                print('Service is already registered! Trying to recover')
+                self.service_path = f'/org/freedesktop/resolve1/dnssd/{self.name}'
+                self.unpublish()
+                self.publish(True)
+            else:
+                raise e
 
-    def unpublish(self):
+    def unpublish(self, silent=False):
         """ Remove publishing of ourselves as devkit device since we are quitting.
         """
-        self.group.Reset()
-        self.group = None
+        if self.service_path:
+            if not silent:
+                print(f'UnregisterService {self.service_path}')
+            self.resolve1_unregister(self.service_path)
+            self.service_path = None
 
     def force_publish(self, exit_event):
         while True:
             exit_event.wait(timeout=FORCE_PUBLISH_INTERVAL)
             if exit_event.is_set():
                 break
-            self.publish()
+            self.publish(False, True)
+
+    def on_signal_shutdown(self):
+        print('Shutting down the httpd server')
+        # This is blocking and needs to run in a thread, otherwise we'll deadlock
+        threading.Thread(target=self.httpd.shutdown, daemon=True).start()
 
     def run_server(self):
         """ Run server until keyboard interrupt or we are killed
@@ -419,10 +494,12 @@ class DevkitService:
             exit_event = threading.Event()
             thread = threading.Thread(target=self.force_publish, args=[exit_event,], daemon=True).start()
 
+        set_exit_callback(self.on_signal_shutdown)
         try:
             self.httpd.serve_forever()
         except KeyboardInterrupt:
             pass
+        set_exit_callback(None)
 
         if thread:
             exit_event.set()
@@ -433,9 +510,6 @@ class DevkitService:
 
 
 if __name__ == "__main__":
-    print(f'==========================')
-    print(f'  SteamOS Devkit Service')
-    print(f'==========================')
     parser = argparse.ArgumentParser()
     parser.add_argument('--hooks', required=False, action='store', help='hooks directory')
     conf = parser.parse_args()
@@ -447,5 +521,4 @@ if __name__ == "__main__":
 
     service.publish()
     service.run_server()
-
     service.unpublish()
