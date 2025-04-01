@@ -379,7 +379,7 @@ class DevkitService:
             bus.get_object(avahi.DBUS_NAME,
                            server.EntryGroupNew()),
             avahi.DBUS_INTERFACE_ENTRY_GROUP)
-        avahi_object.AddService(avahi.IF_UNSPEC, avahi.PROTO_UNSPEC, dbus.UInt32(0),
+        avahi_object.AddService(avahi.IF_UNSPEC, avahi.PROTO_INET, dbus.UInt32(0),
                                 self.name, self.stype, self.domain, self.host,
                                 dbus.UInt16(int(self.port)), self.text)
 
