@@ -34,6 +34,7 @@ import subprocess
 import tempfile
 import urllib.parse
 import argparse
+import threading
 
 import dbus
 import avahi
@@ -54,6 +55,10 @@ PROPERTIES = {"txtvers": 1,
                   ENTRY_POINT
               ]}
 
+# 4/25/2025:
+# we observe that some wireless configurations do not receive mdns packets, which prevents the service from being discovered
+# the root cause is currently unknown, we force publish every 10 seconds to work around this
+FORCE_PUBLISH_INTERVAL = 10
 
 def write_file(data: bytes) -> str:
     """ Write given bytes to a temporary file and return the filename
@@ -391,13 +396,34 @@ class DevkitService:
         """
         self.group.Reset()
 
+    def force_publish(self, exit_event):
+        while True:
+            exit_event.wait(timeout=FORCE_PUBLISH_INTERVAL)
+            if exit_event.is_set():
+                break
+            self.publish()
+
     def run_server(self):
         """ Run server until keyboard interrupt or we are killed
         """
+
+        thread = None
+        exit_event = None
+        global FORCE_PUBLISH_INTERVAL
+        if 'ForcePublishInterval' in self.settings:
+            FORCE_PUBLISH_INTERVAL = int(self.settings['ForcePublishInterval'])
+        if FORCE_PUBLISH_INTERVAL != 0:
+            exit_event = threading.Event()
+            thread = threading.Thread(target=self.force_publish, args=[exit_event,], daemon=True).start()
+
         try:
             self.httpd.serve_forever()
         except KeyboardInterrupt:
             pass
+
+        if thread:
+            exit_event.set()
+            thread.join()
 
         self.httpd.server_close()
         print(f"done serving at port: {self.port}")
