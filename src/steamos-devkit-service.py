@@ -389,12 +389,15 @@ class DevkitService:
                                 dbus.UInt16(int(self.port)), self.text)
 
         avahi_object.Commit()
+        if self.group:
+            self.group.Reset()
         self.group = avahi_object
 
     def unpublish(self):
         """ Remove publishing of ourselves as devkit device since we are quitting.
         """
         self.group.Reset()
+        self.group = None
 
     def force_publish(self, exit_event):
         while True:
