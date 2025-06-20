@@ -90,10 +90,8 @@ PROPERTIES = {"txtvers": 1,
                   ENTRY_POINT
               ]}
 
-# 4/25/2025:
-# we observe that some wireless configurations do not receive mdns packets, which prevents the service from being discovered
-# the root cause is currently unknown, we force publish every 10 seconds to work around this
-FORCE_PUBLISH_INTERVAL = 10
+# Forced mDNS republish currently disabled, was causing a bad interaction with org.freedesktop.resolve1
+FORCE_PUBLISH_INTERVAL = 0
 
 def write_file(data: bytes) -> str:
     """ Write given bytes to a temporary file and return the filename
