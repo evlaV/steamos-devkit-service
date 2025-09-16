@@ -57,7 +57,7 @@ do
         then
             install -m 0600 -o "$user" -g "$group" "$public_key" "$home/.ssh/authorized_keys"
         else
-            if ! grep -qF "$(cut -d " " -f2 "$public_key")" "$home/.ssh/authorized_keys"
+            if ! ( grep -v '^#' "$home/.ssh/authorized_keys" | grep -qF "$(cut -d " " -f2 "$public_key")" )
             then
                 if [ -n "$(tail -1c "$home/.ssh/authorized_keys")" ]
                 then
