@@ -336,7 +336,7 @@ class DevkitHandler(BaseHTTPRequestHandler):
 class DevkitService:
     """ Class to run as service.
 
-    Parses configuration, creates handler, registers with avahi, etc.
+    Parses configuration, creates handler, registers an entry in dynamic DNS, etc.
     """
     def __init__(self):
         global ENTRY_POINT_USER
