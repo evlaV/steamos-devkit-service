@@ -1,9 +1,0 @@
-"appbuild"
-{
-        "appid" "935870"
-        "buildoutput" "output"
-        "depots"
-        {
-                "935871" "depot_build_935871.vdf"
-        }
-}
